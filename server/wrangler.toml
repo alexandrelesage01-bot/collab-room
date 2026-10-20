@@ -1,0 +1,23 @@
+name = "ableton-collab"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+# Une salle = un Durable Object (gratuit sur le plan Workers Free).
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
+# Les samples audio partagés : eux aussi dans des Durable Objects (offre gratuite,
+# pas de R2 ni de moyen de paiement). Limites gratuites : 5 Go au total,
+# 100 000 écritures par jour.
+[[durable_objects.bindings]]
+name = "SAMPLES"
+class_name = "SampleStore"
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["SampleStore"]

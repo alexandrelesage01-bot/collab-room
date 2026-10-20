@@ -1,0 +1,7 @@
+{
+    "name": "Collab Room",
+    "author": "Alexandre Lesage",
+    "entry": "dist/extension.js",
+    "version": "0.1.0",
+    "minimumApiVersion": "1.0.0"
+}

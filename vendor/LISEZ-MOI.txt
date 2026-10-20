@@ -1,0 +1,6 @@
+Dépose ici le SDK d'Ableton : le fichier ableton-extensions-sdk-<version>.tgz
+qui se trouve dans le zip « Extensions SDK » téléchargé depuis Centercode
+(programme bêta d'Ableton). Puis, à la racine du projet : npm run setup
+
+Ce dossier n'est jamais commité : la licence du SDK interdit de le redistribuer
+en dehors d'une Extension.

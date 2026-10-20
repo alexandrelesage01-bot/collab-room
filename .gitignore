@@ -1,0 +1,8 @@
+node_modules/
+release/
+extension/dist/
+server/.wrangler/
+.DS_Store
+# SDK d'Ableton : licence interdisant la redistribution
+vendor/*
+!vendor/LISEZ-MOI.txt
