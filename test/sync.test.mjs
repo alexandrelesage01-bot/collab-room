@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { createRequire } from "node:module";
-import { FakeLive, memoryNet, client, settle, view, alexSet, liveSet, pair } from "./helpers.mjs";
+import { FakeLive, memoryNet, client, settle, view, alexSet, liveSet, pair, fakeBind } from "./helpers.mjs";
 
 const require = createRequire(import.meta.url);
 const { diff, absorb, parseCode, formatCode, makeCode, lcsIndexes, renderWindow, parseWindowResult } =
@@ -198,6 +198,63 @@ test("bouton tourné sur un device : relu après le délai, appliqué chez l'aut
   assert.deepEqual(view(A), view(B));
   a.stop();
   b.stop();
+});
+
+test("rendu audio refusé par Live sans message : pas de plantage, réessai possible", async () => {
+  const net = memoryNet();
+  const A = alexSet();
+  const resources = fakeBind(A).ctx.resources;
+  const realRender = resources.renderPreFxAudio;
+  resources.renderPreFxAudio = () => Promise.reject(); // comme Live : rejet sans erreur
+  const a = client(net, A, "Alex", "create");
+  await a.start();
+  await settle([a]);
+  const B = liveSet();
+  const b = client(net, B, "Victor", "join");
+  await b.start();
+  await settle([a, b]);
+  assert.ok(a.events.some((e) => e.type === "warning" && /refusé le rendu/.test(e.text)));
+  assert.equal(view(B).tracks.find((t) => t.name === "Vox").arr.length, 0); // pas encore d'audio
+  // « Synchroniser maintenant » : on réessaie, et cette fois Live accepte.
+  resources.renderPreFxAudio = realRender;
+  a.renderFailures.clear();
+  await settle([a, b]);
+  assert.deepEqual(view(A), view(B));
+  a.stop();
+  b.stop();
+});
+
+test("clip audio trop long : pas de rendu, un message clair", async () => {
+  const net = memoryNet();
+  const A = alexSet();
+  const vox = A.o(A.trackByName("Vox"));
+  const clip = A.o(vox.arr[0]);
+  clip.end = Math.fround(4 + 600); // 600 temps à 120 BPM = 5 min
+  let renders = 0;
+  const resources = fakeBind(A).ctx.resources;
+  const realRender = resources.renderPreFxAudio;
+  resources.renderPreFxAudio = (...args) => (renders++, realRender(...args));
+  const a = client(net, A, "Alex", "create");
+  await a.start();
+  await settle([a]);
+  assert.equal(renders, 0);
+  assert.ok(a.events.some((e) => e.type === "warning" && /trop long/.test(e.text)));
+  a.stop();
+});
+
+test("envoi du sample refusé par le serveur : le clip n'est pas annoncé", async () => {
+  const net = memoryNet();
+  net.samples.put = async () => {
+    throw new Error("fichier trop gros pour le serveur");
+  };
+  const A = alexSet();
+  const a = client(net, A, "Alex", "create");
+  await a.start();
+  await settle([a]);
+  const vox = Object.entries(net.core.state).find(([k, v]) => /\/a\//.test(k) && v.kind === "audio");
+  assert.equal(vox[1].sample, null);
+  assert.ok(a.events.some((e) => e.type === "warning" && /trop gros/.test(e.text)));
+  a.stop();
 });
 
 test("salle vide : rejoindre le signale et n'y envoie rien", async () => {

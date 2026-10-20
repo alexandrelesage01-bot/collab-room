@@ -36,6 +36,11 @@ const num = (x) => (typeof x === "bigint" ? Number(x) : x);
 const near = (a, b) => Math.abs(a - b) < 1e-4;
 const hid = (obj) => String(obj.handle.id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Live rejette parfois sans aucune erreur (rejet « vide ») : ne jamais lire e.message directement.
+const errMsg = (e) => (e && e.message) || (e != null && String(e)) || "erreur inconnue";
+const RENDER_RETRY_MS = 60_000;
+// Au-delà, le rendu dépasserait ce que le serveur accepte (30 Mo ≈ 2 min 50 en WAV stéréo).
+const MAX_AUDIO_SECONDS = 150;
 
 function stable(v) {
   if (v === null || typeof v !== "object") return JSON.stringify(v);
@@ -131,6 +136,7 @@ class HttpStore {
   }
   async put(hash, buf) {
     const r = await fetch(`${this.base}/s/${hash}`, { method: "PUT", body: buf });
+    if (r.status === 413) throw new Error("fichier trop gros pour le serveur");
     if (!r.ok) throw new Error(`envoi du sample refusé (${r.status})`);
   }
   async get(hash) {
@@ -257,6 +263,7 @@ class Session {
     this.paramCache = new Map(); // id du device → valeurs de ses réglages
     this.audioIds = new Map(); // id partagé d'un clip audio → { fp, sample } (rendu envoyé ou reçu)
     this.renders = new Map(); // rendus audio en cours
+    this.renderFailures = new Map(); // id partagé → { fp, at } du dernier rendu refusé
     this.paramsReadAt = 0;
     this.stats = { n: 0, total: 0, max: 0, since: Date.now() };
     this.clientId = crypto.randomBytes(6).toString("hex");
@@ -379,9 +386,9 @@ class Session {
   }
 
   onTickError(e) {
-    if (e.code !== "SET_CHANGED" || !this.paused) console.error("Collab Room:", e.message || e);
+    if (!e || e.code !== "SET_CHANGED" || !this.paused) console.error("Collab Room:", errMsg(e));
     if (!this.ready && this._fail) this._fail(e);
-    if (e.code === "SET_CHANGED") {
+    if (e && e.code === "SET_CHANGED") {
       if (!this.paused) {
         this.paused = true;
         clearInterval(this.timer);
@@ -442,7 +449,10 @@ class Session {
         try {
           await this.samples.upload(op.v.sample.hash);
         } catch (e) {
-          this.warn("upload", `Audio non partagé : ${e.message}`);
+          this.warn("upload", `Audio non partagé : ${errMsg(e)}`);
+          // Les autres ne pourraient pas le télécharger : on ne l'annonce pas. Il repartira
+          // si le clip change (nouveau rendu).
+          op.v = { ...op.v, sample: null };
         }
       }
     }
@@ -737,12 +747,29 @@ class Session {
     const fp = this.audioFingerprint(c);
     const known = this.audioIds.get(cid);
     if (known && known.fp === fp) return known.sample;
+    const failed = this.renderFailures.get(cid);
+    if (failed && failed.fp === fp && Date.now() - failed.at < RENDER_RETRY_MS) return null;
+    const song = this.song();
+    const seconds = ((c.endTime - c.startTime) * 60) / ((song && song.tempo) || 120);
+    if (seconds > MAX_AUDIO_SECONDS) {
+      this.warn(`long:${cid}`, `Le clip audio « ${c.name || t.name} » dure ${Math.round(seconds / 60)} min : trop long pour être partagé (2 min 30 maximum). Coupe-le en morceaux.`);
+      return null;
+    }
     if (!this.renders.has(cid)) {
+      const where = `piste « ${t.name} », temps ${r3(c.startTime)}–${r3(c.endTime)}`;
       const job = this.renderClip(t, c)
         .then((sample) => {
-          if (sample) this.audioIds.set(cid, { fp, sample });
+          if (sample) {
+            this.audioIds.set(cid, { fp, sample });
+            this.renderFailures.delete(cid);
+            console.log(`Collab Room: rendu audio OK (${where})`);
+          }
         })
-        .catch((e) => this.warn("render", `Rendu audio impossible : ${e.message || e}`))
+        .catch((e) => {
+          this.renderFailures.set(cid, { fp, at: Date.now() });
+          console.error(`Collab Room: rendu audio refusé par Live (${where}) : ${errMsg(e)}`);
+          this.warn("render", "Live a refusé le rendu d'un clip audio. Clique « Synchroniser maintenant » pour réessayer.");
+        })
         .finally(() => this.renders.delete(cid));
       this.renders.set(cid, job);
     }
@@ -800,7 +827,7 @@ class Session {
       await fn();
     } catch (e) {
       console.error(`Collab Room: ${key}:`, e);
-      this.warn("apply:" + key.split("/").slice(0, 3).join("/"), `Changement non appliqué (${key}) : ${e.message}`);
+      this.warn("apply:" + key.split("/").slice(0, 3).join("/"), `Changement non appliqué (${key}) : ${errMsg(e)}`);
     }
   }
 
@@ -939,6 +966,7 @@ class Session {
         this.ids.clip.set(hid(c), cid);
         this.setClipProps(c, v);
         this.audioIds.set(cid, { fp: this.audioFingerprint(c), sample: v.sample });
+        console.log(`Collab Room: clip audio reçu et créé (piste « ${t.name} », « ${v.name || v.sample.name} »)`);
         return;
       }
       this.ids.clip.set(hid(c), cid);
@@ -995,7 +1023,7 @@ class Session {
         await t.insertDevice(name, pos);
         pos++;
       } catch (e) {
-        this.warn("device:" + name, `Device « ${name} » introuvable ici (plugin absent ?) : ${e.message || e}`);
+        this.warn("device:" + name, `Device « ${name} » introuvable ici (plugin absent ?) : ${errMsg(e)}`);
       }
     }
   }
@@ -1093,7 +1121,7 @@ class App {
       this.ctx.commands.registerCommand(id, () => {
         fn().catch((e) => {
           console.error("Collab Room:", e);
-          this.flash(`Erreur : ${e.message}`, 4000);
+          this.flash(`Erreur : ${errMsg(e)}`, 4000);
         });
       });
       for (const scope of SCOPES) {
@@ -1181,7 +1209,8 @@ class App {
         } else return;
       } catch (e) {
         console.error("Collab Room:", e);
-        notice = { kind: "error", text: e.message.charAt(0).toUpperCase() + e.message.slice(1) };
+        const m = errMsg(e);
+        notice = { kind: "error", text: m.charAt(0).toUpperCase() + m.slice(1) };
       }
     }
   }
@@ -1270,7 +1299,9 @@ class App {
 
   async syncNow() {
     if (!this.session) return this.flash("Pas de session en cours.\nClic droit → Collab Room… pour en créer ou en rejoindre une.");
+    this.session.renderFailures.clear(); // depuis une commande, Live accepte peut-être le rendu
     await this.session.resume();
+    await Promise.all([...this.session.renders.values()]);
     await sleep(600); // le temps que les accusés et les changements des autres arrivent
     await this.session.loop();
     if (this.session.paused) return this.flash("Ce n'est pas le Set de la session : rouvre-le, ou quitte la session.", 4000);

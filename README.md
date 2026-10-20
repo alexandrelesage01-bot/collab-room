@@ -28,7 +28,7 @@ Tu rouvres le projet plus tard ? Rejoins la même session : les pistes sont reco
 | Tempo, nombre de scènes | Automation, enveloppes de clips |
 | Pistes MIDI et audio : nom, mute, solo, volume, pan | Pistes de groupe, pistes de retour, routing |
 | Clips de session et d'arrangement : notes MIDI, nom, couleur, boucle, mute | Ordre des pistes (Live ne permet pas de les déplacer) |
-| Clips audio de l'**Arrangement**, envoyés en rendu pré-effets (une fois, rangés par empreinte) | Clips audio de la vue **Session** (Live ne sait pas les rendre) |
+| Clips audio de l'**Arrangement** (≤ 2 min 30), envoyés en rendu pré-effets (une fois, rangés par empreinte) | Clips audio de la vue **Session** (Live ne sait pas les rendre) |
 | Devices natifs : ajout, suppression, ordre, tous les paramètres | État interne des plugins tiers (seuls leurs paramètres suivent) |
 
 **Plugins tiers** : chacun doit avoir les mêmes. S'il en manque un chez quelqu'un, il reçoit un avertissement et le reste continue.
@@ -100,7 +100,7 @@ Le code :
 ## Tests
 
 ```sh
-npm test                                   # 19 tests avec le faux SDK : rejoindre, modifs croisées, conflits,
+npm test                                   # 22 tests avec le faux SDK : rejoindre, modifs croisées, conflits,
                                            # coupure réseau, relance de Live, devices, plugin absent, à trois…
                                            # + 3 tests avec le vrai SDK (sautés s'il n'est pas installé)
 npm run server:dev                         # serveur local

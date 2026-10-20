@@ -66,13 +66,13 @@ La fenêtre **Collab Room…** montre :
 | Le tempo | L'automation |
 | Les pistes MIDI et audio : nom, volume, pan, mute, solo | Les pistes de groupe et de retour |
 | Les clips MIDI et leurs notes (Session et Arrangement) | Les clips audio de la vue **Session** |
-| Les clips audio de l'**Arrangement** | Le routing |
+| Les clips audio de l'**Arrangement** (jusqu'à 2 min 30 par clip) | Le routing |
 | Les instruments et effets **d'Ableton** et tous leurs réglages | Le son interne des **plugins** (VST/AU) |
 
 ### Bon à savoir
 
 - **Plugins (VST/AU) :** tout le monde doit avoir les mêmes. Les réglages suivent, mais un plugin absent chez quelqu'un ne peut pas être ajouté chez lui.
-- **Audio :** un clip audio de l'Arrangement est envoyé tel qu'on l'entend, comme un « bounce », avant les effets de la piste. Il arrive quelques secondes après les notes : c'est normal. S'il est warpé chez toi, il arrive « figé » au tempo actuel.
+- **Audio :** seuls les clips audio de l'**Arrangement** se partagent, pas ceux de la vue Session. Chaque clip est envoyé tel qu'on l'entend, comme un « bounce », avant les effets de la piste. Il arrive quelques secondes après les notes : c'est normal. S'il est warpé chez toi, il arrive « figé » au tempo actuel. **2 min 30 maximum par clip** : coupe les clips plus longs en morceaux.
 - **Deux personnes qui touchent la même chose en même temps :** la dernière modif gagne, et tout le monde finit avec le même résultat.
 - **Changer de projet pendant une session** met la session **en pause**, sans rien effacer chez les autres. Rouvre le bon projet puis clique **Synchroniser maintenant**, ou **quitte** la session.
 - **Pense à sauvegarder.** Chacun garde sa propre copie du projet. Pour la retrouver plus tard : rouvre-la, puis **rejoins** la même session avec le même code. Rien n'est dupliqué.
@@ -86,7 +86,7 @@ La fenêtre **Collab Room…** montre :
 | **Collab Room n'apparaît pas** dans le clic droit | Fais le clic droit sur le **nom** d'une piste. Vérifie que **Developer Mode** est **désactivé** dans Réglages → Extensions, puis relance Live. |
 | « **The Ableton extension has stopped running** » | Télécharge la dernière version de Collab Room et réinstalle-la (glisse-la à nouveau dans Réglages → Extensions). Si ça revient, signale-le (voir plus bas). |
 | « **La session … n'existe pas ou est vide** » | Le code est faux, ou la personne qui invite a quitté la session. Redemande le code. |
-| Un **clip audio** n'arrive pas | Attends quelques secondes. Seuls les clips de l'**Arrangement** se partagent, pas ceux de la vue Session. |
+| Un **clip audio** n'arrive pas | Attends quelques secondes. Seuls les clips de l'**Arrangement** se partagent (pas ceux de la vue Session), et chacun doit durer **2 min 30 au maximum**. |
 | Un **plugin** manque | La personne doit installer le même plugin. |
 | La fenêtre dit « **synchro manuelle** » | Clique **Synchroniser maintenant** de temps en temps. |
 

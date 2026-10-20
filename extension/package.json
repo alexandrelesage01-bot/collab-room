@@ -1,6 +1,6 @@
 {
   "name": "collab-room",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Dossier de l'Extension lu par ableton-extensions-cli (run / package). Les dépendances sont à la racine du projet."
 }
