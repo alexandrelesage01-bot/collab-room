@@ -3,6 +3,8 @@
 //   node tools/robot.mjs            → attend qu'un code de session soit copié
 //                                     (clique « Créer une session » dans Live), puis rejoint
 //   node tools/robot.mjs K7M-Q2P    → rejoint directement cette session
+//   ROBOT_SCENARIO=audio …          → teste l'audio : envoie un accord en WAV sur une piste
+//                                     « Robot Audio », et vérifie les rendus reçus de Live
 //
 // Le robot parle au serveur exactement comme l'Extension (mêmes clés, mêmes messages) :
 // il crée sa piste « Robot » avec un Drift, y pose un clip, change d'accord, touche au
@@ -40,13 +42,13 @@ let room = parseCode(process.argv[2]);
 if (!room) {
   const before = parseCode(clipboard());
   say("J'attends un code de session : dans Live, clique « Créer une session » (le code sera copié).");
-  for (let i = 0; i < 600 && !room; i++) {
+  for (let i = 0; i < Number(process.env.ROBOT_WAIT_MINUTES || 20) * 30 && !room; i++) {
     const c = parseCode(clipboard());
     if (c && c !== before) room = c;
     else await sleep(2000);
   }
   if (!room) {
-    say("Pas de code reçu en 20 minutes, j'abandonne.");
+    say("Pas de code reçu, j'abandonne.");
     process.exit(1);
   }
 }
@@ -131,6 +133,98 @@ if (!tracks.length) {
   process.exit(1);
 }
 say(`J'ai rejoint ${code} : ${tracks.length} piste(s), tempo ${state["song/tempo"]}.`);
+
+// --- scénario audio
+async function audioScenario() {
+  const tempo = state["song/tempo"] || 120;
+  const beats = 8;
+  const seconds = (beats * 60) / tempo;
+  const wav = makeWav(seconds, [130.81, 155.56, 196.0, 261.63]); // Cm
+  const hash = crypto.createHash("sha256").update(wav).digest("hex");
+  const up = await fetch(`${SERVER}/s/${hash}`, { method: "PUT", body: wav });
+  say(`J'envoie un accord de ${seconds.toFixed(1)} s au serveur (${Math.round(wav.length / 1024)} Ko) : ${up.status}`);
+  const tid = crypto.randomBytes(4).toString("hex");
+  const cid = crypto.randomBytes(4).toString("hex");
+  send([[`t/${tid}`, { kind: "audio" }], [`t/${tid}/name`, "Robot Audio"], [`t/${tid}/mute`, false], [`t/${tid}/solo`, false]]);
+  await sleep(2000);
+  say("Je pose le clip audio au début de l'Arrangement, sur la piste « Robot Audio ».");
+  send([[`t/${tid}/a/${cid}`, {
+    kind: "audio", name: "Robot – accord", color: null, muted: false, looping: false,
+    loopStart: 0, loopEnd: beats, startMarker: 0, endMarker: beats, start: 0, end: beats,
+    sample: { hash, name: "robot-accord.wav" },
+  }]]);
+  say("Si ton Live le reçoit, le clip apparaît dans l'Arrangement (vue Arrangement, piste « Robot Audio »).");
+  say("Pour tester l'envoi : glisse un sample sur une piste audio de l'ARRANGEMENT. Je vérifierai le rendu que Live m'enverra.");
+  const checked = new Set([hash]);
+  const until = Date.now() + STAY_MINUTES * 60_000;
+  while (Date.now() < until) {
+    for (const [k, v] of Object.entries(state)) {
+      if (!/^t\/[^/]+\/a\//.test(k) || v?.kind !== "audio" || !v.sample?.hash || checked.has(v.sample.hash)) continue;
+      checked.add(v.sample.hash);
+      const r = await fetch(`${SERVER}/s/${v.sample.hash}`);
+      if (!r.ok) {
+        say(`❌ Le rendu de « ${v.name || v.sample.name} » n'est pas sur le serveur (${r.status}).`);
+        continue;
+      }
+      const buf = Buffer.from(await r.arrayBuffer());
+      const same = crypto.createHash("sha256").update(buf).digest("hex") === v.sample.hash;
+      say(`✅ Rendu reçu de ton Live : « ${v.sample.name} », ${describeAudio(buf)}${same ? ", intact" : ", ⚠️ empreinte différente"}.`);
+    }
+    await sleep(2000);
+  }
+}
+
+function makeWav(seconds, freqs) {
+  const rate = 44100;
+  const n = Math.round(seconds * rate);
+  const data = Buffer.alloc(n * 4);
+  for (let i = 0; i < n; i++) {
+    const t = i / rate;
+    const env = Math.min(1, t * 20) * Math.min(1, (seconds - t) * 4);
+    let x = 0;
+    for (const f of freqs) x += Math.sin(2 * Math.PI * f * t);
+    const v = Math.round((x / freqs.length) * env * 0.5 * 32767);
+    data.writeInt16LE(v, i * 4);
+    data.writeInt16LE(v, i * 4 + 2);
+  }
+  const h = Buffer.alloc(44);
+  h.write("RIFF", 0); h.writeUInt32LE(36 + data.length, 4); h.write("WAVE", 8);
+  h.write("fmt ", 12); h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(2, 22);
+  h.writeUInt32LE(rate, 24); h.writeUInt32LE(rate * 4, 28); h.writeUInt16LE(4, 32); h.writeUInt16LE(16, 34);
+  h.write("data", 36); h.writeUInt32LE(data.length, 40);
+  return Buffer.concat([h, data]);
+}
+
+// Format et durée d'un WAV ou d'un AIFF (Live rend selon son réglage « Record File Type »).
+function describeAudio(buf) {
+  const kb = `${Math.round(buf.length / 1024)} Ko`;
+  const tag = buf.toString("ascii", 0, 4);
+  if (tag === "RIFF" && buf.toString("ascii", 8, 12) === "WAVE") {
+    let at = 12, ch = 0, rate = 0, bits = 0, dataLen = 0;
+    while (at + 8 <= buf.length) {
+      const id = buf.toString("ascii", at, at + 4);
+      const len = buf.readUInt32LE(at + 4);
+      if (id === "fmt ") {
+        ch = buf.readUInt16LE(at + 10);
+        rate = buf.readUInt32LE(at + 12);
+        bits = buf.readUInt16LE(at + 22);
+      }
+      if (id === "data") dataLen = len;
+      at += 8 + len + (len % 2);
+    }
+    const sec = rate && ch && bits ? dataLen / (rate * ch * (bits / 8)) : 0;
+    return `WAV ${ch} canaux, ${rate} Hz, ${bits} bits, ${sec.toFixed(2)} s (${kb})`;
+  }
+  if (tag === "FORM") return `AIFF (${kb})`;
+  return `format inconnu « ${tag} » (${kb})`;
+}
+
+if (process.env.ROBOT_SCENARIO === "audio") {
+  await audioScenario();
+  say("Fin du test audio. Merci !");
+  ws.close();
+  process.exit(0);
+}
 
 // --- le scénario
 const note = (pitch, startTime, duration, velocity) => ({
