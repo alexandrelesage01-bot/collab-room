@@ -174,7 +174,11 @@ class FakeLive {
       }),
       songGetTracks: () => L.S.tracks.map(r),
       songCreateMidiTrack: async(() => r(L.addTrack("midi"))),
-      songCreateAudioTrack: async(() => r(L.addTrack("audio"))),
+      songCreateAudioTrack: async(() => {
+        const t = L.addTrack("audio");
+        if (L.defaultAudioDevice) L.addDevice(t, L.defaultAudioDevice); // piste audio par défaut de l'utilisateur
+        return r(t);
+      }),
       songDeleteTrack: async((_s, t) => {
         const i = L.S.tracks.findIndex((x) => x.id === t.id);
         if (i < 0) throw new Error("piste inconnue");

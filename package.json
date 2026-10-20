@@ -1,6 +1,6 @@
 {
   "name": "ableton-collab",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Produire à plusieurs sur le même Set Ableton Live, en direct, avec une Extension Live et un petit serveur Cloudflare.",
   "scripts": {

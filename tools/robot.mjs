@@ -3,6 +3,8 @@
 //   node tools/robot.mjs            → attend qu'un code de session soit copié
 //                                     (clique « Créer une session » dans Live), puis rejoint
 //   node tools/robot.mjs K7M-Q2P    → rejoint directement cette session
+//   ROBOT_SCENARIO=host …           → c'est le robot qui CRÉE la session (piste MIDI avec Drift,
+//                                     piste audio, tempo 126) et copie le code : ton Live la rejoint
 //   ROBOT_SCENARIO=audio …          → teste l'audio : envoie un accord en WAV sur une piste
 //                                     « Robot Audio », et vérifie les rendus reçus de Live
 //
@@ -38,8 +40,11 @@ const clipboard = () => {
 };
 
 // --- le code de la session
+const HOST = process.env.ROBOT_SCENARIO === "host";
 let room = parseCode(process.argv[2]);
-if (!room) {
+if (HOST) {
+  room = [...Array(6)].map(() => ALPHABET[crypto.randomInt(ALPHABET.length)]).join("");
+} else if (!room) {
   const before = parseCode(clipboard());
   say("J'attends un code de session : dans Live, clique « Créer une session » (le code sera copié).");
   for (let i = 0; i < Number(process.env.ROBOT_WAIT_MINUTES || 20) * 30 && !room; i++) {
@@ -58,6 +63,7 @@ const code = room.slice(0, 3) + "-" + room.slice(3);
 const clientId = "robot" + crypto.randomBytes(4).toString("hex");
 const ws = new WebSocket(`${SERVER.replace(/^http/, "ws")}/r/${room}/ws?name=${NAME}&id=${clientId}`);
 const state = {};
+let peers = [];
 let buf = {};
 let ready;
 const welcomed = new Promise((r) => (ready = r));
@@ -108,6 +114,7 @@ ws.onmessage = (e) => {
       ready(m.seq);
     }
   } else if (m.t === "peers") {
+    peers = m.peers;
     say(`Dans la session : ${m.peers.join(", ")}`);
   } else if (m.t === "ops") {
     let shown = 0;
@@ -128,11 +135,11 @@ if (seq === -1) {
   process.exit(1);
 }
 const tracks = Object.keys(state).filter((k) => /^t\/[^/]+$/.test(k));
-if (!tracks.length) {
+if (!tracks.length && !HOST) {
   say(`La session ${code} est vide : vérifie le code, ou attends que Live ait fini de l'envoyer.`);
   process.exit(1);
 }
-say(`J'ai rejoint ${code} : ${tracks.length} piste(s), tempo ${state["song/tempo"]}.`);
+if (!HOST) say(`J'ai rejoint ${code} : ${tracks.length} piste(s), tempo ${state["song/tempo"]}.`);
 
 // --- scénario audio
 async function audioScenario() {
@@ -219,6 +226,72 @@ function describeAudio(buf) {
   return `format inconnu « ${tag} » (${kb})`;
 }
 
+// --- le robot crée la session, ton Live la rejoint
+async function hostScenario() {
+  const keys = crypto.randomBytes(4).toString("hex");
+  const sound = crypto.randomBytes(4).toString("hex");
+  const tempo = 126;
+  const wav = makeWav((8 * 60) / tempo, [130.81, 155.56, 196.0, 261.63]);
+  const hash = crypto.createHash("sha256").update(wav).digest("hex");
+  await fetch(`${SERVER}/s/${hash}`, { method: "PUT", body: wav });
+  send([
+    ["song/tempo", tempo],
+    ["song/scenes", 8],
+    [`t/${keys}`, { kind: "midi" }], [`t/${keys}/name`, "Robot Keys"], [`t/${keys}/mute`, false], [`t/${keys}/solo`, false],
+    [`t/${keys}/vol`, 0.85], [`t/${keys}/pan`, 0], [`t/${keys}/d/0`, { name: "Drift" }],
+    [`t/${keys}/s/0`, clip("Robot – Cm", arp(CHORDS[0][1]))],
+    [`t/${sound}`, { kind: "audio" }], [`t/${sound}/name`, "Robot Audio"], [`t/${sound}/mute`, false], [`t/${sound}/solo`, false],
+    [`t/${sound}/vol`, 0.85], [`t/${sound}/pan`, 0],
+    [`t/${sound}/a/${crypto.randomBytes(4).toString("hex")}`, {
+      kind: "audio", name: "Robot – accord", color: null, muted: false, looping: false,
+      loopStart: 0, loopEnd: 8, startMarker: 0, endMarker: 8, start: 0, end: 8,
+      sample: { hash, name: "robot-accord.wav" },
+    }],
+  ]);
+  if (!process.env.ROBOT_NO_CLIPBOARD) {
+    try {
+      execFileSync("pbcopy", { input: code });
+    } catch {}
+  }
+  say(`Session ${code} créée et copiée dans ton presse-papiers.`);
+  say("Dans Live : ⌘N (Set vide) → clic droit sur une piste → Collab Room… → Rejoindre.");
+  while (!peers.some((n) => n !== NAME)) await sleep(1000);
+  await sleep(4000);
+  say("Tu es là ! Je change d'accord toutes les 8 s (lance le clip de « Robot Keys », scène 1).");
+  const checked = new Set([hash]);
+  const until = Date.now() + STAY_MINUTES * 60_000;
+  let n = 1;
+  while (Date.now() < until) {
+    if (n < 6) {
+      const [name, chord] = CHORDS[n % CHORDS.length];
+      send([[`t/${keys}/s/0`, clip(`Robot – ${name}`, arp(chord))]]);
+      say(`Accord : ${name}`);
+      n++;
+    }
+    for (let i = 0; i < 4; i++) {
+      await checkRenders(checked);
+      await sleep(2000);
+    }
+  }
+  say("Fin du test. Merci !");
+  ws.close();
+  process.exit(0);
+}
+
+async function checkRenders(checked) {
+  for (const [k, v] of Object.entries(state)) {
+    if (!/^t\/[^/]+\/a\//.test(k) || v?.kind !== "audio" || !v.sample?.hash || checked.has(v.sample.hash)) continue;
+    checked.add(v.sample.hash);
+    const r = await fetch(`${SERVER}/s/${v.sample.hash}`);
+    if (!r.ok) {
+      say(`❌ Le rendu de « ${v.name || v.sample.name} » n'est pas sur le serveur (${r.status}).`);
+      continue;
+    }
+    const buf = Buffer.from(await r.arrayBuffer());
+    say(`✅ Rendu audio reçu de ton Live : « ${v.sample.name} », ${describeAudio(buf)}.`);
+  }
+}
+
 if (process.env.ROBOT_SCENARIO === "audio") {
   await audioScenario();
   say("Fin du test audio. Merci !");
@@ -242,6 +315,8 @@ const CHORDS = [
   ["Eb", [63, 67, 70, 75]],
   ["Bb", [58, 62, 65, 70]],
 ];
+
+if (HOST) await hostScenario(); // ne revient pas
 
 // Une piste « Robot » déjà là (session précédente) : on la reprend.
 const existing = Object.keys(state).find((k) => /^t\/[^/]+\/name$/.test(k) && state[k] === "Robot" && state[k.slice(0, -5)]?.kind === "midi");

@@ -41,6 +41,8 @@ const errMsg = (e) => (e && e.message) || (e != null && String(e)) || "erreur in
 const RENDER_RETRY_MS = 60_000;
 // Au-delà, le rendu dépasserait ce que le serveur accepte (30 Mo ≈ 2 min 50 en WAV stéréo).
 const MAX_AUDIO_SECONDS = 150;
+const UPLOAD_RETRY_MS = 30_000;
+const APPLY_RETRIES = 3;
 
 function stable(v) {
   if (v === null || typeof v !== "object") return JSON.stringify(v);
@@ -125,22 +127,32 @@ async function sha256File(p) {
   return hash.digest("hex");
 }
 
+// Une coupure réseau passagère ne doit pas faire perdre un sample : un nouvel essai.
+async function fetchRetry(url, opts) {
+  try {
+    return await fetch(url, opts);
+  } catch {
+    await sleep(1500);
+    return fetch(url, opts);
+  }
+}
+
 class HttpStore {
   constructor(server) {
     this.base = server.replace(/\/$/, "");
   }
   async has(hash) {
-    const r = await fetch(`${this.base}/s/${hash}`, { method: "HEAD" });
+    const r = await fetchRetry(`${this.base}/s/${hash}`, { method: "HEAD" });
     if (r.status === 501) throw new Error("le serveur ne stocke pas encore les samples");
     return r.ok;
   }
   async put(hash, buf) {
-    const r = await fetch(`${this.base}/s/${hash}`, { method: "PUT", body: buf });
+    const r = await fetchRetry(`${this.base}/s/${hash}`, { method: "PUT", body: buf });
     if (r.status === 413) throw new Error("fichier trop gros pour le serveur");
     if (!r.ok) throw new Error(`envoi du sample refusé (${r.status})`);
   }
   async get(hash) {
-    const r = await fetch(`${this.base}/s/${hash}`);
+    const r = await fetchRetry(`${this.base}/s/${hash}`);
     if (!r.ok) throw new Error(`sample introuvable sur le serveur (${r.status})`);
     return Buffer.from(await r.arrayBuffer());
   }
@@ -264,6 +276,8 @@ class Session {
     this.audioIds = new Map(); // id partagé d'un clip audio → { fp, sample } (rendu envoyé ou reçu)
     this.renders = new Map(); // rendus audio en cours
     this.renderFailures = new Map(); // id partagé → { fp, at } du dernier rendu refusé
+    this.uploadFailures = new Map(); // empreinte → { at, permanent } du dernier envoi raté
+    this.retries = []; // changements reçus qui n'ont pas pu s'appliquer, à réessayer
     this.paramsReadAt = 0;
     this.stats = { n: 0, total: 0, max: 0, since: Date.now() };
     this.clientId = crypto.randomBytes(6).toString("hex");
@@ -424,6 +438,12 @@ class Session {
     const ops = diff(this.baseline, cur);
     if (ops.length) await this.send(ops);
     this.baseline = cur;
+    if (this.retries.length) {
+      const now = Date.now();
+      const due = this.retries.filter((r) => r.at <= now);
+      this.retries = this.retries.filter((r) => r.at > now);
+      this.inbox = [...due, ...this.inbox]; // les plus récents passent après, donc gagnent
+    }
     if (this.inbox.length) {
       const batch = this.inbox;
       this.inbox = [];
@@ -448,8 +468,11 @@ class Session {
       if (op.v && op.v.kind === "audio" && op.v.sample) {
         try {
           await this.samples.upload(op.v.sample.hash);
+          this.uploadFailures.delete(op.v.sample.hash);
         } catch (e) {
-          this.warn("upload", `Audio non partagé : ${errMsg(e)}`);
+          const permanent = /trop gros/.test(errMsg(e));
+          this.uploadFailures.set(op.v.sample.hash, { at: Date.now(), permanent });
+          this.warn("upload", `Audio non partagé${permanent ? "" : " pour l'instant (nouvel essai dans 30 s)"} : ${errMsg(e)}`);
           // Les autres ne pourraient pas le télécharger : on ne l'annonce pas. Il repartira
           // si le clip change (nouveau rendu).
           op.v = { ...op.v, sample: null };
@@ -483,8 +506,10 @@ class Session {
       if (op.from) from.add(op.from);
     }
     if (!latest.size) return;
-    const ops = [...latest].map(([k, v]) => ({ k, v }));
+    const attempts = new Map(batch.filter((op) => op.attempt).map((op) => [op.k, op.attempt]));
+    const ops = [...latest].map(([k, v]) => ({ k, v, attempt: attempts.get(k) }));
     await this.applyOps(ops);
+    this.queueRetries(this._failed);
     const cur = await this.readModel();
     if (!cur) return;
     const touched = ops.map((o) => o.k);
@@ -548,6 +573,7 @@ class Session {
     }
     // 2. Tout l'état de la salle.
     await this.applyOps(Object.entries(S).map(([k, v]) => ({ k, v })));
+    this.queueRetries(this._failed);
     // 3. Les pistes vides du Set de départ disparaissent.
     if (remote.length) {
       for (const l of local) {
@@ -746,7 +772,11 @@ class Session {
   audioSample(t, c, cid) {
     const fp = this.audioFingerprint(c);
     const known = this.audioIds.get(cid);
-    if (known && known.fp === fp) return known.sample;
+    if (known && known.fp === fp) {
+      const up = known.sample && this.uploadFailures.get(known.sample.hash);
+      if (up && (up.permanent || Date.now() - up.at < UPLOAD_RETRY_MS)) return null;
+      return known.sample; // (après 30 s, réannoncé : send() retentera l'envoi)
+    }
     const failed = this.renderFailures.get(cid);
     if (failed && failed.fp === fp && Date.now() - failed.at < RENDER_RETRY_MS) return null;
     const song = this.song();
@@ -802,6 +832,8 @@ class Session {
       return v === null ? 7 : 4;
     };
     ops = ops.slice().sort((a, b) => rank(a) - rank(b));
+    this._failed = [];
+    this._created = new Set();
     this._deviceTargets = new Map();
     const deviceOps = new Map();
     for (const op of ops) {
@@ -811,23 +843,43 @@ class Session {
         deviceOps.get(p[1]).push(op);
       }
     }
+    // Live ajoute aux nouvelles pistes les devices de la piste par défaut de chacun (un
+    // EQ Eight, par exemple) : une piste créée pour reproduire celle d'un autre ne doit
+    // avoir que ses devices à lui. On passe donc aussi ces pistes-là dans applyDevices.
+    const applyAllDevices = async () => {
+      for (const tid of this._created) if (!deviceOps.has(tid)) deviceOps.set(tid, []);
+      for (const [tid, dops] of deviceOps) await this.safely(`t/${tid}/d`, () => this.applyDevices(tid, dops), dops);
+    };
     let devicesDone = false;
     for (const op of ops) {
       if (rank(op) >= 2 && !devicesDone) {
         devicesDone = true;
-        for (const [tid, dops] of deviceOps) await this.safely(op.k, () => this.applyDevices(tid, dops));
+        await applyAllDevices();
       }
       if (rank(op) === 2) continue;
-      await this.safely(op.k, () => this.applyOne(op.k, op.v));
+      await this.safely(op.k, () => this.applyOne(op.k, op.v), [op]);
     }
+    if (!devicesDone) await applyAllDevices();
   }
 
-  async safely(key, fn) {
+  async safely(key, fn, ops) {
     try {
       await fn();
     } catch (e) {
-      console.error(`Collab Room: ${key}:`, e);
+      console.error(`Collab Room: ${key}: ${errMsg(e)}`);
       this.warn("apply:" + key.split("/").slice(0, 3).join("/"), `Changement non appliqué (${key}) : ${errMsg(e)}`);
+      if (this._failed) this._failed.push(...ops);
+    }
+  }
+
+  // Les changements reçus qui ont échoué (téléchargement coupé…) sont réessayés
+  // jusqu'à APPLY_RETRIES fois, de plus en plus espacés. Un changement plus récent
+  // sur la même clé passe devant (il arrive après dans la file).
+  queueRetries(failed) {
+    for (const op of failed) {
+      const attempt = (op.attempt || 0) + 1;
+      if (attempt > APPLY_RETRIES) continue;
+      this.retries.push({ k: op.k, v: op.v, attempt, at: Date.now() + 3000 * attempt });
     }
   }
 
@@ -853,6 +905,7 @@ class Session {
       if (!t) {
         t = await (v.kind === "audio" ? song.createAudioTrack() : song.createMidiTrack());
         this.ids.track.set(hid(t), tid);
+        if (this._created) this._created.add(tid);
       }
       return;
     }

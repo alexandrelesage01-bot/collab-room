@@ -257,6 +257,47 @@ test("envoi du sample refusé par le serveur : le clip n'est pas annoncé", asyn
   a.stop();
 });
 
+test("téléchargement d'un sample coupé chez l'invité : réessayé, le clip finit par arriver", async () => {
+  const net = memoryNet();
+  const realGet = net.samples.get;
+  let fails = 1;
+  net.samples.get = async (h) => {
+    if (fails-- > 0) throw new Error("fetch failed");
+    return realGet(h);
+  };
+  const A = alexSet();
+  const a = client(net, A, "Alex", "create");
+  await a.start();
+  await settle([a]);
+  const B = liveSet();
+  const b = client(net, B, "Victor", "join");
+  await b.start();
+  await settle([a, b]);
+  assert.equal(view(B).tracks.find((t) => t.name === "Vox").arr.length, 0); // raté une fois
+  await new Promise((r) => setTimeout(r, 3100)); // premier nouvel essai
+  await settle([a, b]);
+  assert.deepEqual(view(A), view(B));
+  a.stop();
+  b.stop();
+});
+
+test("piste audio par défaut avec un EQ Eight chez l'invité : rien n'est ajouté chez l'hôte", async () => {
+  const net = memoryNet();
+  const A = alexSet();
+  const a = client(net, A, "Alex", "create");
+  await a.start();
+  await settle([a]);
+  const B = liveSet();
+  B.defaultAudioDevice = "EQ Eight"; // comme le Live d'Alex : EQ Eight sur chaque nouvelle piste audio
+  const b = client(net, B, "Victor", "join");
+  await b.start();
+  await settle([a, b]);
+  assert.deepEqual(view(B).tracks.find((t) => t.name === "Vox").devices, []);
+  assert.deepEqual(view(A), view(B));
+  a.stop();
+  b.stop();
+});
+
 test("salle vide : rejoindre le signale et n'y envoie rien", async () => {
   const net = memoryNet();
   const b = client(net, liveSet(), "Victor", "join", "NOPE00");

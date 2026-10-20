@@ -100,7 +100,7 @@ Le code :
 ## Tests
 
 ```sh
-npm test                                   # 22 tests avec le faux SDK : rejoindre, modifs croisées, conflits,
+npm test                                   # 24 tests avec le faux SDK : rejoindre, modifs croisées, conflits,
                                            # coupure réseau, relance de Live, devices, plugin absent, à trois…
                                            # + 3 tests avec le vrai SDK (sautés s'il n'est pas installé)
 npm run server:dev                         # serveur local
